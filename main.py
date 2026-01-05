@@ -46,34 +46,56 @@ DARK_STYLESHEET = """
 """
 
 
-# ================= 辅助类：只负责画角标 =================
+# ================= 辅助类：绘制背景和角标 =================
 class CornerFrame(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.draw_corners = False
-        self.corner_color = QColor(128, 128, 128, 180)  # 灰色角标
+        self.is_auto_mode = False
+        self.corner_color = QColor(128, 128, 128, 200)
+        # 默认隐形背景 (初始化为黑色，后续会动态更新)
+        self.auto_bg_fill = QColor(0, 0, 0, 2)
+
+    def set_mode(self, auto_mode):
+        self.is_auto_mode = auto_mode
+        self.update()
+
+    def set_auto_bg_color(self, color):
+        """[新增] 接收采样到的屏幕颜色，并应用极低透明度"""
+        # 保持颜色基调，但强制 Alpha = 2 (解决透明度问题)
+        self.auto_bg_fill = QColor(color)
+        self.auto_bg_fill.setAlpha(2)
+        if self.is_auto_mode:
+            self.update()
 
     def set_draw_corners(self, enable):
-        self.draw_corners = enable
+        # 兼容旧接口，实际上由 set_mode 控制绘图逻辑，这里触发更新即可
         self.update()
 
     def paintEvent(self, event):
-        super().paintEvent(event)
-        # 只在需要时绘制四个角的标记，背景色完全交给 Stylesheet 处理
-        if self.draw_corners:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(self.corner_color, 3))
-            w, h = self.width(), self.height()
-            length = 15
+        # 手动挡：交给 Stylesheet 绘制
+        if not self.is_auto_mode:
+            super().paintEvent(event)
+            return
 
-            # 左上角
-            painter.drawLine(0, 0, length, 0)
-            painter.drawLine(0, 0, 0, length)
+        # 自动挡：手动绘制
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
 
-            # 右下角
-            painter.drawLine(w, h, w - length, h)
-            painter.drawLine(w, h, w, h - length)
+        # 1. 填充“隐形”背景 (使用采样颜色 + Alpha 2)
+        painter.fillRect(self.rect(), self.auto_bg_fill)
+
+        # 2. 绘制角标
+        painter.setPen(QPen(self.corner_color, 3))
+        w, h = self.width(), self.height()
+        length = 15
+
+        # 左上角
+        painter.drawLine(0, 0, length, 0)
+        painter.drawLine(0, 0, 0, length)
+
+        # 右下角
+        painter.drawLine(w, h, w - length, h)
+        painter.drawLine(w, h, w, h - length)
 
 
 # ================= 独立窗口：书籍选择器 =================
@@ -256,8 +278,7 @@ class SettingsDialog(QDialog):
         layout.addRow("Legado地址:", self.ip_input)
 
         self.check_auto_mode = QCheckBox("🦎 自动挡 (变色龙)")
-        self.check_auto_mode.setToolTip(
-            "开启后，背景隐形(但可点击)，颜色自动失效。\n不透明度滑块将直接控制【文字】的透明度。")
+        self.check_auto_mode.setToolTip("开启后，背景变为背景色+极低透明度。\n字体颜色自动反转。")
         self.check_auto_mode.setChecked(self.config.get("auto_mode", False))
         self.check_auto_mode.toggled.connect(self.on_auto_mode_toggled)
         layout.addRow(self.check_auto_mode)
@@ -362,7 +383,7 @@ class StealthReader(QWidget):
         if self.config["ip"] and self.config["ip"].startswith("http"):
             self.fetch_bookshelf_silent()
 
-        self.update_text_signal.emit("初始化完成。\n自动挡模式：背景隐形。\n透明度滑块将控制【文字】。")
+        self.update_text_signal.emit("初始化完成。\n自动挡模式下，背景将模拟屏幕色。")
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -501,6 +522,11 @@ class StealthReader(QWidget):
             color = img.pixelColor(0, 0)
             brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
 
+            # [修改] 动态设置背景色
+            # 使用采样到的背景颜色，但强制 Alpha=2 (解决透明度问题)
+            # 这样背景就和屏幕完全融合了
+            self.content_frame.set_auto_bg_color(color)
+
             # 亮背景->黑字，暗背景->白字
             base_text_color = (0, 0, 0) if brightness > 128 else (255, 255, 255)
 
@@ -520,27 +546,14 @@ class StealthReader(QWidget):
 
         if self.config.get("auto_mode", False):
             # [自动挡]
-            # 1. 窗口整体强制不透明 (确保文字不发虚)
-            self.setWindowOpacity(1.0)
+            self.setWindowOpacity(1.0)  # 整体不透明
 
-            # 2. 开启角标
+            # 设置模式为自动，CornerFrame 会自己画背景
+            self.content_frame.set_mode(True)
+            self.content_frame.setStyleSheet("background: transparent; border: none;")
             self.content_frame.set_draw_corners(True)
+
             self.chameleon_timer.start()
-
-            # 3. [核心修改] 使用用户设置的背景色，但强制 Alpha=1
-            # 解析当前设置的背景色
-            bg_color = QColor(self.config['bg_color'])
-            # 构建一个几乎透明的背景色字符串 (Alpha=1)
-            clickable_transparent = f"rgba({bg_color.red()}, {bg_color.green()}, {bg_color.blue()}, 2)"
-
-            self.content_frame.setStyleSheet(f"""
-                CornerFrame {{
-                    background-color: {clickable_transparent}; 
-                    border: none;
-                }}
-            """)
-
-            # 4. 立即触发变色
             self.adjust_color_to_background()
 
         else:
@@ -548,8 +561,10 @@ class StealthReader(QWidget):
             self.chameleon_timer.stop()
             self.content_frame.set_draw_corners(False)
 
-            # 恢复整体透明度控制
             self.setWindowOpacity(self.config["opacity"])
+            self.setStyleSheet("")  # 清除可能存在的背景设置
+
+            self.content_frame.set_mode(False)  # 切换回手动模式 (CSS控制)
 
             frame_style = f"""
                 CornerFrame {{
@@ -616,11 +631,11 @@ class StealthReader(QWidget):
         self.fetch_bookshelf_silent()
         self.book_selector_dialog = BookSelector(self, self)
 
-        # 临时关闭自动模式样式
         was_auto = self.config.get("auto_mode")
         if was_auto:
             self.setWindowOpacity(0.95)
             self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
+            self.content_frame.set_mode(False)  # 暂停自动背景绘制
 
         if self.book_selector_dialog.exec_() == QDialog.Accepted:
             if self.book_selector_dialog.selected_book:
@@ -641,6 +656,7 @@ class StealthReader(QWidget):
         if was_auto:
             self.setWindowOpacity(0.95)
             self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
+            self.content_frame.set_mode(False)
 
         toc = TocSelector(self.config['ip'], self.current_book['bookUrl'],
                           self.current_chapter_index, self.current_toc, self)
@@ -799,7 +815,7 @@ class StealthReader(QWidget):
         self.is_settings_open = True
         was_auto = self.config.get("auto_mode")
         if was_auto:
-            self.content_frame.set_draw_corners(False)
+            self.content_frame.set_mode(False)  # 暂停绘制隐形背景
             self.setWindowOpacity(0.95)
             self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
 
@@ -815,7 +831,7 @@ class StealthReader(QWidget):
 
         self.is_settings_open = False
         if self.config.get("ghost_mode", False) and not self.underMouse():
-            self.setWindowOpacity(0.01)
+            self.setWindowOpacity(0.005)
 
     def keyPressEvent(self, event):
         key = event.key()
