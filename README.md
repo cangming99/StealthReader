@@ -1,4 +1,4 @@
-# 📘 SysManual (StealthReader)
+# 📘 StealthReader
 
 > **"It's just a system manual, nothing to see here."**
 > 
