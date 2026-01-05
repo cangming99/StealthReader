@@ -35,7 +35,7 @@
 
 ### 方式二：使用打包好的 Exe (推荐用户)
 
-直接双击运行 `SysManual.exe` (或你打包的名字)。
+直接双击运行 `StealthReader.exe` 。
 *注意：首次运行时，杀毒软件可能会误报（因为涉及全局热键监听），请添加信任。*
 
 ## ⚙️ 配置指南
@@ -73,4 +73,4 @@
 pyinstaller -F -w main.py
 
 # 伪装打包 (指定图标和名称)
-pyinstaller -F -w -i manual.ico -n "SysManual" main.py
+pyinstaller -F -w -i read.ico -n "StealthReader" main.py
