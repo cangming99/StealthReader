@@ -11,8 +11,12 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QMenu,
                              QColorDialog, QCheckBox, QHBoxLayout,
                              QFrame, QTextEdit, QShortcut, QListWidget,
                              QListWidgetItem, QLabel)
-from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QObject, QThread
-from PyQt5.QtGui import QFont, QColor, QCursor, QKeySequence
+from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QObject, QThread, QTimer
+from PyQt5.QtGui import QFont, QColor, QCursor, QKeySequence, QPainter, QPen
+
+# 启用高分屏支持
+QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
 CONFIG_FILE = "config.json"
 
@@ -25,6 +29,7 @@ DEFAULT_CONFIG = {
     "bg_color": "rgba(30, 30, 30, 200)",
     "boss_key": "Esc",
     "ghost_mode": False,
+    "auto_mode": False,
     "window_width": 400,
     "window_height": 300
 }
@@ -41,54 +46,72 @@ DARK_STYLESHEET = """
 """
 
 
-# ================= 独立窗口：书籍选择器 (修复版) =================
+# ================= 辅助类：绘制角标的 Frame =================
+class CornerFrame(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.draw_corners = False
+        self.corner_color = QColor(128, 128, 128, 200)
+
+    def set_draw_corners(self, enable):
+        self.draw_corners = enable
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.draw_corners:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(self.corner_color, 3))
+            w, h = self.width(), self.height()
+            length = 15
+
+            # 左上角
+            painter.drawLine(0, 0, length, 0)
+            painter.drawLine(0, 0, 0, length)
+
+            # 右下角
+            painter.drawLine(w, h, w - length, h)
+            painter.drawLine(w, h, w, h - length)
+
+
+# ================= 独立窗口：书籍选择器 =================
 class BookSelector(QDialog):
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
-        self.main_window = main_window  # 持有主窗口引用，以便实时获取数据
+        self.main_window = main_window
         self.setWindowTitle("📚 书架")
         self.resize(400, 500)
         self.selected_book = None
         self.setStyleSheet(DARK_STYLESHEET)
         self.initUI()
-
-        # 初始化时先加载一次当前有的数据
         self.populate_list(self.main_window.books)
 
     def initUI(self):
         layout = QVBoxLayout()
-
-        # 顶部操作区
         top_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索书名或作者...")
         self.search_input.textChanged.connect(self.filter_books)
         top_layout.addWidget(self.search_input)
 
-        # [新增] 刷新按钮
         btn_refresh = QPushButton("🔄 刷新")
         btn_refresh.setFixedWidth(60)
         btn_refresh.clicked.connect(self.manual_refresh)
         top_layout.addWidget(btn_refresh)
 
         layout.addLayout(top_layout)
-
-        # 列表
         self.list_widget = QListWidget()
         self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         layout.addWidget(self.list_widget)
-
         self.setLayout(layout)
 
     def manual_refresh(self):
         self.setWindowTitle("📚 书架 (加载中...)")
-        # 调用主窗口的方法去获取数据
         self.main_window.fetch_bookshelf_silent()
 
     def update_data(self, books):
-        """当主窗口数据更新时被调用"""
         self.setWindowTitle(f"📚 书架 (共 {len(books)} 本)")
-        # 如果正在搜索，保持搜索结果；否则显示全部
         current_search = self.search_input.text()
         if current_search:
             self.filter_books(current_search)
@@ -97,9 +120,7 @@ class BookSelector(QDialog):
 
     def populate_list(self, books_to_show):
         self.list_widget.clear()
-        if not books_to_show:
-            return
-
+        if not books_to_show: return
         for book in books_to_show:
             display_text = f"{book['name']} - {book['author']}"
             item = QListWidgetItem(display_text)
@@ -224,7 +245,7 @@ class SettingsDialog(QDialog):
         self.temp_text_color = self.config.get("text_color")
         self.temp_bg_color = self.config.get("bg_color")
         self.setWindowTitle("设置")
-        self.resize(350, 400)
+        self.resize(350, 480)
         self.setStyleSheet(DARK_STYLESHEET)
         self.initUI()
 
@@ -232,14 +253,25 @@ class SettingsDialog(QDialog):
         layout = QFormLayout()
         self.ip_input = QLineEdit(self.config.get("ip"))
         layout.addRow("Legado地址:", self.ip_input)
+
+        self.check_auto_mode = QCheckBox("🦎 自动挡 (变色龙)")
+        self.check_auto_mode.setToolTip(
+            "开启后，背景隐形(但可点击)，颜色自动失效。\n不透明度滑块将直接控制【文字】的透明度。")
+        self.check_auto_mode.setChecked(self.config.get("auto_mode", False))
+        self.check_auto_mode.toggled.connect(self.on_auto_mode_toggled)
+        layout.addRow(self.check_auto_mode)
+
+        # 这个滑块在自动挡下控制文字透明度，手动挡下控制窗口整体透明度
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(int(self.config.get("opacity") * 100))
-        layout.addRow("正常不透明度:", self.opacity_slider)
+        layout.addRow("不透明度 (文字/整体):", self.opacity_slider)
+
         self.font_spin = QSpinBox()
         self.font_spin.setRange(8, 60)
         self.font_spin.setValue(self.config.get("font_size"))
         layout.addRow("字体大小:", self.font_spin)
+
         self.btn_text_color = QPushButton("文字颜色")
         self.btn_text_color.setStyleSheet(f"background-color: {self.temp_text_color};")
         self.btn_text_color.clicked.connect(self.pick_text_color)
@@ -247,19 +279,26 @@ class SettingsDialog(QDialog):
         self.btn_bg_color.setStyleSheet(f"background-color: {self.temp_bg_color};")
         self.btn_bg_color.clicked.connect(self.pick_bg_color)
         layout.addRow(self.btn_text_color, self.btn_bg_color)
-        self.check_ghost_mode = QCheckBox("启用“幽灵模式” (鼠标移开变透明)")
+
+        self.check_ghost_mode = QCheckBox("👻 幽灵模式 (移开变透明)")
         self.check_ghost_mode.setChecked(self.config.get("ghost_mode", False))
         layout.addRow(self.check_ghost_mode)
+
         self.boss_key_input = QLineEdit(self.config.get("boss_key", "Esc"))
         layout.addRow("全局老板键:", self.boss_key_input)
-        hint_label = QPushButton("⚠️ IP设置后重启生效更佳")
-        hint_label.setFlat(True)
-        hint_label.setStyleSheet("color: gray; text-align: left; border: none;")
-        layout.addRow(hint_label)
+
         btn_save = QPushButton("💾 保存并应用")
         btn_save.clicked.connect(self.save_settings)
         layout.addRow(btn_save)
+
+        self.on_auto_mode_toggled(self.check_auto_mode.isChecked())
         self.setLayout(layout)
+
+    def on_auto_mode_toggled(self, checked):
+        # 自动挡：禁用手动颜色选择，但务必保留透明度滑块
+        self.btn_bg_color.setEnabled(not checked)
+        self.btn_text_color.setEnabled(not checked)
+        self.opacity_slider.setEnabled(True)
 
     def pick_text_color(self):
         color = QColorDialog.getColor()
@@ -281,6 +320,7 @@ class SettingsDialog(QDialog):
         self.config["text_color"] = self.temp_text_color
         self.config["bg_color"] = self.temp_bg_color
         self.config["ghost_mode"] = self.check_ghost_mode.isChecked()
+        self.config["auto_mode"] = self.check_auto_mode.isChecked()
         self.accept()
 
 
@@ -288,7 +328,6 @@ class SettingsDialog(QDialog):
 class StealthReader(QWidget):
     update_text_signal = pyqtSignal(str)
     hotkey_signal = pyqtSignal()
-    # [新增] 书架数据更新的信号
     bookshelf_updated_signal = pyqtSignal(list)
 
     def __init__(self):
@@ -306,25 +345,25 @@ class StealthReader(QWidget):
         self.resize_margin = 20
         self.last_toggle_time = 0
         self.local_shortcut = None
-
-        # 记录当前打开的书架窗口实例
         self.book_selector_dialog = None
+
+        self.chameleon_timer = QTimer(self)
+        self.chameleon_timer.setInterval(500)
+        self.chameleon_timer.timeout.connect(self.adjust_color_to_background)
 
         self.initUI()
         self.initTray()
 
         self.update_text_signal.connect(self.on_update_text_safe)
         self.hotkey_signal.connect(self.toggle_window)
-        # 连接书架更新信号到处理槽
         self.bookshelf_updated_signal.connect(self.on_bookshelf_updated)
 
         self.refresh_hotkeys()
 
-        # [修复] 只要IP不为空且以http开头，就尝试连接，不再限制 192.168
         if self.config["ip"] and self.config["ip"].startswith("http"):
             self.fetch_bookshelf_silent()
 
-        self.update_text_signal.emit("初始化完成。\n右键可打开【书架】。\n已移除启动IP限制。")
+        self.update_text_signal.emit("初始化完成。\n自动挡模式：背景隐形。\n透明度滑块将控制【文字】。")
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -344,7 +383,7 @@ class StealthReader(QWidget):
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4)
         except Exception as e:
-            print(f"保存配置失败: {e}")
+            print(f"Failed to save config: {e}")
 
     def on_update_text_safe(self, text):
         self.text_edit.setPlainText(text)
@@ -352,9 +391,7 @@ class StealthReader(QWidget):
             self.text_edit.verticalScrollBar().setValue(0)
 
     def on_bookshelf_updated(self, books):
-        """当书架数据拉取成功，更新内存并通知书架窗口"""
         self.books = books
-        # 如果书架窗口是打开的，通知它更新
         if self.book_selector_dialog and self.book_selector_dialog.isVisible():
             self.book_selector_dialog.update_data(books)
 
@@ -386,7 +423,7 @@ class StealthReader(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.content_frame = QFrame()
+        self.content_frame = CornerFrame()
         self.content_layout = QVBoxLayout(self.content_frame)
         self.content_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -436,31 +473,102 @@ class StealthReader(QWidget):
             self.hide()
         else:
             self.showNormal()
-            self.setWindowOpacity(self.config['opacity'])
+            self.apply_style()  # 确保模式正确应用
             self.activateWindow()
+            if self.config.get("auto_mode", False):
+                self.chameleon_timer.start()
+                self.adjust_color_to_background()
+
+    # ================= 变色龙核心逻辑 (已修复) =================
+    def adjust_color_to_background(self):
+        if not self.isVisible() or not self.config.get("auto_mode"):
+            self.chameleon_timer.stop()
+            return
+
+        screen = QApplication.primaryScreen()
+        if not screen: return
+
+        # 采样点：窗口左侧 5px 处 (避开窗口自己，采样真实背景)
+        pick_x = self.x() - 5
+        pick_y = self.y() + 10
+
+        if pick_x < 0:  # 如果窗口贴左边，就采右边
+            pick_x = self.x() + self.width() + 5
+
+        pixmap = screen.grabWindow(0, pick_x, pick_y, 1, 1)
+        img = pixmap.toImage()
+
+        if img.width() > 0:
+            color = img.pixelColor(0, 0)
+            brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
+
+            # 背景越亮，字体越黑；背景越暗，字体越白
+            base_text_color = (0, 0, 0) if brightness > 128 else (255, 255, 255)
+
+            # 获取用户设置的透明度 (0.1 ~ 1.0) 并应用到文字的 Alpha 通道
+            user_alpha = int(self.config.get("opacity", 0.9) * 255)
+
+            rgba_color = f"rgba({base_text_color[0]}, {base_text_color[1]}, {base_text_color[2]}, {user_alpha})"
+
+            self.text_edit.setStyleSheet(f"""
+                QTextEdit {{
+                    color: {rgba_color};
+                    background-color: transparent;
+                }}
+            """)
 
     def apply_style(self):
-        self.setWindowOpacity(self.config["opacity"])
-        frame_style = f"""
-            QFrame {{
-                background-color: {self.config['bg_color']};
-                border-radius: 5px;
-            }}
-        """
-        self.content_frame.setStyleSheet(frame_style)
-        text_style = f"""
-            QTextEdit {{
-                color: {self.config['text_color']};
-                background-color: transparent;
-            }}
-        """
-        self.text_edit.setStyleSheet(text_style)
         self.text_edit.setFont(QFont(self.config['font_family'], self.config['font_size']))
+
+        if self.config.get("auto_mode", False):
+            # [自动挡]
+            # 1. 窗口整体不透明 (确保文字 Alpha 通道生效)
+            self.setWindowOpacity(1.0)
+
+            # 2. 开启角标
+            self.content_frame.set_draw_corners(True)
+            self.chameleon_timer.start()
+
+            # 3. 背景锁定为 alpha=1 (肉眼不可见但能点击拖拽)
+            self.content_frame.setStyleSheet("""
+                CornerFrame {
+                    background-color: rgba(0, 0, 0, 5); 
+                    border: none;
+                }
+            """)
+
+            # 4. 文字颜色由 adjust_color_to_background 接管
+            self.adjust_color_to_background()
+
+        else:
+            # [手动挡]
+            self.chameleon_timer.stop()
+            self.content_frame.set_draw_corners(False)
+
+            # 恢复整体透明度控制
+            self.setWindowOpacity(self.config["opacity"])
+
+            frame_style = f"""
+                CornerFrame {{
+                    background-color: {self.config['bg_color']};
+                    border-radius: 5px;
+                }}
+            """
+            self.content_frame.setStyleSheet(frame_style)
+
+            text_style = f"""
+                QTextEdit {{
+                    color: {self.config['text_color']};
+                    background-color: transparent;
+                }}
+            """
+            self.text_edit.setStyleSheet(text_style)
 
     def enterEvent(self, event):
         self.is_mouse_in = True
         if self.config.get("ghost_mode", False):
-            self.setWindowOpacity(self.config['opacity'])
+            # 幽灵模式移入：恢复当前模式的正常状态
+            self.apply_style()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -469,11 +577,12 @@ class StealthReader(QWidget):
         global_pos = QCursor.pos()
         local_pos = self.mapFromGlobal(global_pos)
         if self.rect().contains(local_pos): return
+
         if self.config.get("ghost_mode", False):
+            # 幽灵模式移出：无论自动还是手动，整体变透明
             self.setWindowOpacity(0.005)
         super().leaveEvent(event)
 
-    # ================= 业务逻辑 =================
     def fetch_bookshelf_silent(self):
         threading.Thread(target=self._fetch_bookshelf_thread, daemon=True).start()
 
@@ -483,7 +592,6 @@ class StealthReader(QWidget):
             res = requests.get(url, timeout=3)
             if res.status_code == 200:
                 data = res.json()
-                # 成功后，通过信号发送数据回主线程
                 self.bookshelf_updated_signal.emit(data.get("data", []))
         except:
             pass
@@ -503,20 +611,20 @@ class StealthReader(QWidget):
             pass
 
     def open_book_selector(self):
-        # 每次打开都尝试刷新一下
         self.fetch_bookshelf_silent()
-
-        # 使用 self.book_selector_dialog 保持引用
         self.book_selector_dialog = BookSelector(self, self)
 
-        # 临时恢复透明度，防止看不见
-        self.setWindowOpacity(self.config["opacity"])
+        was_auto = self.config.get("auto_mode")
+        if was_auto:
+            self.setWindowOpacity(0.95)
+            self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
 
         if self.book_selector_dialog.exec_() == QDialog.Accepted:
             if self.book_selector_dialog.selected_book:
                 self.load_book(self.book_selector_dialog.selected_book)
 
-        self.book_selector_dialog = None  # 关闭后释放引用
+        self.apply_style()
+        self.book_selector_dialog = None
 
     def open_toc_selector(self):
         if not self.current_book:
@@ -526,7 +634,10 @@ class StealthReader(QWidget):
         if not hasattr(self, 'current_toc') or self.current_toc is None:
             self.current_toc = []
 
-        self.setWindowOpacity(self.config["opacity"])
+        was_auto = self.config.get("auto_mode")
+        if was_auto:
+            self.setWindowOpacity(0.95)
+            self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
 
         toc = TocSelector(self.config['ip'], self.current_book['bookUrl'],
                           self.current_chapter_index, self.current_toc, self)
@@ -536,6 +647,8 @@ class StealthReader(QWidget):
                 self.current_chapter_index = toc.selected_index
                 self.update_text_signal.emit(f"跳转到章节: {self.current_chapter_index}")
                 self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index)
+
+        self.apply_style()
 
     def load_book(self, book):
         self.current_book = book
@@ -588,8 +701,7 @@ class StealthReader(QWidget):
                 "durChapterTitle": title
             }
             url = f"{self.config['ip']}/saveBookProgress"
-            res = requests.post(url, json=data, timeout=3)
-            # print(f"同步: {res.status_code}")
+            requests.post(url, json=data, timeout=3)
         except:
             pass
 
@@ -662,6 +774,9 @@ class StealthReader(QWidget):
                 self.move(self.x() + delta.x(), self.y() + delta.y())
                 self.oldPos = event.globalPos()
 
+            if self.config.get("auto_mode"):
+                self.adjust_color_to_background()
+
     def mouseReleaseEvent(self, event):
         self.is_resizing = False
         self.is_moving = False
@@ -679,7 +794,12 @@ class StealthReader(QWidget):
 
     def open_settings(self):
         self.is_settings_open = True
-        self.setWindowOpacity(self.config["opacity"])
+        was_auto = self.config.get("auto_mode")
+        if was_auto:
+            self.content_frame.set_draw_corners(False)
+            self.setWindowOpacity(0.95)
+            self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
+
         dialog = SettingsDialog(self.config, self)
         if dialog.exec_() == QDialog.Accepted:
             self.config = dialog.config
@@ -687,6 +807,9 @@ class StealthReader(QWidget):
             self.apply_style()
             self.refresh_hotkeys()
             self.fetch_bookshelf_silent()
+        else:
+            self.apply_style()
+
         self.is_settings_open = False
         if self.config.get("ghost_mode", False) and not self.underMouse():
             self.setWindowOpacity(0.01)
