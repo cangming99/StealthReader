@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QMenu,
                              QColorDialog, QCheckBox, QHBoxLayout,
                              QFrame, QTextEdit, QShortcut, QListWidget,
                              QListWidgetItem, QLabel)
-from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QObject, QThread, QTimer
+from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QObject, QThread, QTimer, QEvent
 from PyQt5.QtGui import QFont, QColor, QCursor, QKeySequence, QPainter, QPen
 
 # 启用高分屏支持
@@ -52,7 +52,6 @@ class CornerFrame(QFrame):
         super().__init__(parent)
         self.is_auto_mode = False
         self.corner_color = QColor(128, 128, 128, 200)
-        # 默认隐形背景 (初始化为黑色，后续会动态更新)
         self.auto_bg_fill = QColor(0, 0, 0, 2)
 
     def set_mode(self, auto_mode):
@@ -60,40 +59,29 @@ class CornerFrame(QFrame):
         self.update()
 
     def set_auto_bg_color(self, color):
-        """[新增] 接收采样到的屏幕颜色，并应用极低透明度"""
-        # 保持颜色基调，但强制 Alpha = 2 (解决透明度问题)
         self.auto_bg_fill = QColor(color)
         self.auto_bg_fill.setAlpha(2)
         if self.is_auto_mode:
             self.update()
 
     def set_draw_corners(self, enable):
-        # 兼容旧接口，实际上由 set_mode 控制绘图逻辑，这里触发更新即可
         self.update()
 
     def paintEvent(self, event):
-        # 手动挡：交给 Stylesheet 绘制
         if not self.is_auto_mode:
             super().paintEvent(event)
             return
 
-        # 自动挡：手动绘制
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        # 1. 填充“隐形”背景 (使用采样颜色 + Alpha 2)
         painter.fillRect(self.rect(), self.auto_bg_fill)
 
-        # 2. 绘制角标
         painter.setPen(QPen(self.corner_color, 3))
         w, h = self.width(), self.height()
         length = 15
 
-        # 左上角
         painter.drawLine(0, 0, length, 0)
         painter.drawLine(0, 0, 0, length)
-
-        # 右下角
         painter.drawLine(w, h, w - length, h)
         painter.drawLine(w, h, w, h - length)
 
@@ -260,17 +248,13 @@ class TocSelector(QDialog):
         super().closeEvent(event)
 
 
-
-# ================= 设置窗口 (已修改：支持实时预览与还原) =================
+# ================= 设置窗口 =================
 class SettingsDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
-        self.main_window = parent  # 保存主窗口引用
-
-        # 1. 记录原始透明度，用于“取消”时还原
+        self.main_window = parent
         self.original_opacity = self.config.get("opacity", 0.9)
-
         self.temp_text_color = self.config.get("text_color")
         self.temp_bg_color = self.config.get("bg_color")
 
@@ -293,7 +277,6 @@ class SettingsDialog(QDialog):
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(int(self.config.get("opacity") * 100))
-        # 2. 绑定滑块变动信号到预览函数
         self.opacity_slider.valueChanged.connect(self.on_opacity_change)
         layout.addRow("不透明度 (文字/整体):", self.opacity_slider)
 
@@ -318,7 +301,7 @@ class SettingsDialog(QDialog):
         layout.addRow("全局老板键:", self.boss_key_input)
 
         btn_save = QPushButton("💾 保存并应用")
-        btn_save.clicked.connect(self.accept)  # 点击保存调用 accept
+        btn_save.clicked.connect(self.accept)
         layout.addRow(btn_save)
 
         self.on_auto_mode_toggled(self.check_auto_mode.isChecked())
@@ -329,13 +312,9 @@ class SettingsDialog(QDialog):
         self.btn_text_color.setEnabled(not checked)
         self.opacity_slider.setEnabled(True)
 
-    # 3. 新增：实时预览透明度逻辑
     def on_opacity_change(self, value):
-        # 实时修改配置字典中的值
         new_opacity = value / 100.0
         self.config["opacity"] = new_opacity
-
-        # 调用主窗口的样式应用方法，实现实时效果
         if self.main_window:
             self.main_window.apply_style()
 
@@ -351,10 +330,7 @@ class SettingsDialog(QDialog):
             self.temp_bg_color = f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
             self.btn_bg_color.setStyleSheet(f"background-color: {self.temp_bg_color};")
 
-    # 4. 修改：保存设置逻辑 (重写 accept)
     def accept(self):
-        # 这里只负责保存那些没有实时预览的参数
-        # 透明度已经在 on_opacity_change 里实时修改了 self.config["opacity"]
         self.config["ip"] = self.ip_input.text().strip()
         self.config["font_size"] = self.font_spin.value()
         self.config["boss_key"] = self.boss_key_input.text().strip()
@@ -364,21 +340,17 @@ class SettingsDialog(QDialog):
         self.config["auto_mode"] = self.check_auto_mode.isChecked()
         super().accept()
 
-    # 5. 新增：重写 reject (处理取消/关闭/Esc)
     def reject(self):
-        # 如果用户直接关闭窗口，必须把透明度还原回去
         self.config["opacity"] = self.original_opacity
-
-        # 立即刷新主窗口外观
         if self.main_window:
             self.main_window.apply_style()
-
         super().reject()
 
 
 # ================= 主程序 =================
 class StealthReader(QWidget):
-    update_text_signal = pyqtSignal(str)
+    # 【修改】信号增加参数: str(内容), bool(是否滚动到底部)
+    update_text_signal = pyqtSignal(str, bool)
     hotkey_signal = pyqtSignal()
     bookshelf_updated_signal = pyqtSignal(list)
 
@@ -415,7 +387,7 @@ class StealthReader(QWidget):
         if self.config["ip"] and self.config["ip"].startswith("http"):
             self.fetch_bookshelf_silent()
 
-        self.update_text_signal.emit("初始化完成。\n自动挡模式下，背景将模拟屏幕色。")
+        self.update_text_signal.emit("初始化完成。\n自动挡模式下，背景将模拟屏幕色。", False)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -437,10 +409,17 @@ class StealthReader(QWidget):
         except Exception as e:
             print(f"Failed to save config: {e}")
 
-    def on_update_text_safe(self, text):
+    # 【修改】支持根据信号参数滚动到底部或顶部
+    def on_update_text_safe(self, text, is_bottom):
         self.text_edit.setPlainText(text)
-        if "加载" not in text and "连接" not in text and "失败" not in text:
-            self.text_edit.verticalScrollBar().setValue(0)
+        if "加载" in text or "连接" in text or "失败" in text:
+            return
+
+        scrollbar = self.text_edit.verticalScrollBar()
+        if is_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(0)
 
     def on_bookshelf_updated(self, books):
         self.books = books
@@ -486,6 +465,7 @@ class StealthReader(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setTextInteractionFlags(Qt.NoTextInteraction)
         self.text_edit.setFocusPolicy(Qt.NoFocus)
+        self.text_edit.installEventFilter(self)  # 安装事件过滤器
 
         self.content_layout.addWidget(self.text_edit)
         self.main_layout.addWidget(self.content_frame)
@@ -498,6 +478,22 @@ class StealthReader(QWidget):
         self.oldPos = self.pos()
 
         self.apply_style()
+
+    # 事件过滤器：处理滚轮翻页
+    def eventFilter(self, source, event):
+        if source == self.text_edit and event.type() == QEvent.Wheel:
+            scrollbar = self.text_edit.verticalScrollBar()
+            delta = event.angleDelta().y()
+
+            if delta < 0:  # 向下滚动
+                if scrollbar.value() >= scrollbar.maximum() - 2:
+                    self.next_chapter()
+                    return True
+            elif delta > 0:  # 向上滚动
+                if scrollbar.value() <= scrollbar.minimum() + 2:
+                    self.prev_chapter()
+                    return True
+        return super().eventFilter(source, event)
 
     def initTray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -525,13 +521,12 @@ class StealthReader(QWidget):
             self.hide()
         else:
             self.showNormal()
-            self.apply_style()  # 重新应用样式
+            self.apply_style()
             self.activateWindow()
             if self.config.get("auto_mode", False):
                 self.chameleon_timer.start()
                 self.adjust_color_to_background()
 
-    # ================= 变色龙核心逻辑 =================
     def adjust_color_to_background(self):
         if not self.isVisible() or not self.config.get("auto_mode"):
             self.chameleon_timer.stop()
@@ -540,11 +535,10 @@ class StealthReader(QWidget):
         screen = QApplication.primaryScreen()
         if not screen: return
 
-        # 采样点：窗口左侧 5px 处 (避开窗口自己)
         pick_x = self.x() - 5
         pick_y = self.y() + 10
 
-        if pick_x < 0:  # 如果窗口贴左边，就采右边
+        if pick_x < 0:
             pick_x = self.x() + self.width() + 5
 
         pixmap = screen.grabWindow(0, pick_x, pick_y, 1, 1)
@@ -554,15 +548,8 @@ class StealthReader(QWidget):
             color = img.pixelColor(0, 0)
             brightness = 0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue()
 
-            # [修改] 动态设置背景色
-            # 使用采样到的背景颜色，但强制 Alpha=2 (解决透明度问题)
-            # 这样背景就和屏幕完全融合了
             self.content_frame.set_auto_bg_color(color)
-
-            # 亮背景->黑字，暗背景->白字
             base_text_color = (0, 0, 0) if brightness > 128 else (255, 255, 255)
-
-            # [关键] 自动挡下，透明度滑块控制的是文字的 Alpha
             user_alpha = int(self.config.get("opacity", 0.9) * 255)
             rgba_color = f"rgba({base_text_color[0]}, {base_text_color[1]}, {base_text_color[2]}, {user_alpha})"
 
@@ -577,27 +564,18 @@ class StealthReader(QWidget):
         self.text_edit.setFont(QFont(self.config['font_family'], self.config['font_size']))
 
         if self.config.get("auto_mode", False):
-            # [自动挡]
-            self.setWindowOpacity(1.0)  # 整体不透明
-
-            # 设置模式为自动，CornerFrame 会自己画背景
+            self.setWindowOpacity(1.0)
             self.content_frame.set_mode(True)
             self.content_frame.setStyleSheet("background: transparent; border: none;")
             self.content_frame.set_draw_corners(True)
-
             self.chameleon_timer.start()
             self.adjust_color_to_background()
-
         else:
-            # [手动挡]
             self.chameleon_timer.stop()
             self.content_frame.set_draw_corners(False)
-
             self.setWindowOpacity(self.config["opacity"])
-            self.setStyleSheet("")  # 清除可能存在的背景设置
-
-            self.content_frame.set_mode(False)  # 切换回手动模式 (CSS控制)
-
+            self.setStyleSheet("")
+            self.content_frame.set_mode(False)
             frame_style = f"""
                 CornerFrame {{
                     background-color: {self.config['bg_color']};
@@ -605,7 +583,6 @@ class StealthReader(QWidget):
                 }}
             """
             self.content_frame.setStyleSheet(frame_style)
-
             text_style = f"""
                 QTextEdit {{
                     color: {self.config['text_color']};
@@ -617,7 +594,7 @@ class StealthReader(QWidget):
     def enterEvent(self, event):
         self.is_mouse_in = True
         if self.config.get("ghost_mode", False):
-            self.apply_style()  # 恢复
+            self.apply_style()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -630,36 +607,20 @@ class StealthReader(QWidget):
 
         if self.config.get("ghost_mode", False):
             if self.config.get("auto_mode", False):
-                # ================= [自动挡逻辑] =================
-                # 策略：停止更新颜色，隐藏角标，文字透明。
-                # 关键：背景色使用当前采样到的颜色 (R, G, B)，但 Alpha 设为 2。
-                # 这样既能捕获鼠标，其颜色逻辑又与背景融合（不使用死板的黑色）。
-
                 self.chameleon_timer.stop()
                 self.content_frame.set_draw_corners(False)
-
-                # 获取当前采样的背景色
-                # auto_bg_fill 是在 adjust_color_to_background 里更新的 QColor 对象
                 current_bg = self.content_frame.auto_bg_fill
                 r, g, b = current_bg.red(), current_bg.green(), current_bg.blue()
-
-                # 构造 Alpha=1 的动态背景色
-                # 即使它几乎不可见，其 RGB 值依然是“变色龙”采样来的值
                 ghost_bg_style = f"rgba({r}, {g}, {b}, 2)"
-
                 self.text_edit.setStyleSheet(f"""
                     QTextEdit {{
                         color: transparent; 
                         background-color: {ghost_bg_style};
                     }}
                 """)
-
                 self.setWindowOpacity(1.0)
-
             else:
-                # ================= [手动挡逻辑] =================
                 self.setWindowOpacity(0.005)
-
         super().leaveEvent(event)
 
     def fetch_bookshelf_silent(self):
@@ -697,7 +658,7 @@ class StealthReader(QWidget):
         if was_auto:
             self.setWindowOpacity(0.95)
             self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
-            self.content_frame.set_mode(False)  # 暂停自动背景绘制
+            self.content_frame.set_mode(False)
 
         if self.book_selector_dialog.exec_() == QDialog.Accepted:
             if self.book_selector_dialog.selected_book:
@@ -708,7 +669,7 @@ class StealthReader(QWidget):
 
     def open_toc_selector(self):
         if not self.current_book:
-            self.update_text_signal.emit("请先选择一本书！")
+            self.update_text_signal.emit("请先选择一本书！", False)
             return
 
         if not hasattr(self, 'current_toc') or self.current_toc is None:
@@ -726,8 +687,8 @@ class StealthReader(QWidget):
         if toc.exec_() == QDialog.Accepted:
             if toc.selected_index is not None:
                 self.current_chapter_index = toc.selected_index
-                self.update_text_signal.emit(f"跳转到章节: {self.current_chapter_index}")
-                self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index)
+                self.update_text_signal.emit(f"跳转到章节: {self.current_chapter_index}", False)
+                self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index, False)
 
         self.apply_style()
 
@@ -735,33 +696,50 @@ class StealthReader(QWidget):
         self.current_book = book
         self.current_chapter_index = book.get('durChapterIndex', 0)
         self.current_toc = []
-        self.update_text_signal.emit(f"打开: {book['name']}")
-        self.fetch_chapter_content(book['bookUrl'], self.current_chapter_index)
+        self.update_text_signal.emit(f"打开: {book['name']}", False)
+        self.fetch_chapter_content(book['bookUrl'], self.current_chapter_index, False)
         self.fetch_toc_silent(book['bookUrl'])
 
-    def fetch_chapter_content(self, book_url, chapter_index):
+    # 【修改】增加 scroll_to_bottom 参数
+    def fetch_chapter_content(self, book_url, chapter_index, scroll_to_bottom=False):
         t = threading.Thread(target=self._fetch_chapter_thread,
-                             args=(book_url, chapter_index), daemon=True)
+                             args=(book_url, chapter_index, scroll_to_bottom), daemon=True)
         t.start()
 
-    def _fetch_chapter_thread(self, book_url, chapter_index):
+    # 【修改】获取内容并拼接章节名
+    def _fetch_chapter_thread(self, book_url, chapter_index, scroll_to_bottom):
         try:
+            # 获取章节标题
+            chapter_title = ""
+            if hasattr(self, 'current_toc') and self.current_toc:
+                if 0 <= chapter_index < len(self.current_toc):
+                    chapter_title = self.current_toc[chapter_index].get('title', '')
+
+            if not chapter_title:
+                chapter_title = f"第 {chapter_index + 1} 章"
+
             url = f"{self.config['ip']}/getBookContent"
             params = {'url': book_url, 'index': chapter_index}
             res = requests.get(url, params=params, timeout=5)
+
             if res.status_code == 200:
                 data = res.json()
                 if not data.get("isSuccess"):
-                    self.update_text_signal.emit(f"读取失败: {data.get('errorMsg')}")
+                    self.update_text_signal.emit(f"读取失败: {data.get('errorMsg')}", False)
                     return
+
                 raw_content = data.get("data", "")
                 content = raw_content.replace("<br>", "\n").replace("&nbsp;", " ")
-                self.update_text_signal.emit(content)
+
+                # 拼接标题
+                full_text = f"【 {chapter_title} 】\n\n{content}"
+
+                self.update_text_signal.emit(full_text, scroll_to_bottom)
                 self.sync_progress_async()
             else:
-                self.update_text_signal.emit(f"HTTP错误: {res.status_code}")
+                self.update_text_signal.emit(f"HTTP错误: {res.status_code}", False)
         except Exception as e:
-            self.update_text_signal.emit(f"网络错误: {str(e)}")
+            self.update_text_signal.emit(f"网络错误: {str(e)}", False)
 
     def sync_progress_async(self):
         if not self.current_book: return
@@ -813,14 +791,15 @@ class StealthReader(QWidget):
 
     def next_chapter(self):
         self.current_chapter_index += 1
-        self.update_text_signal.emit("加载下一章...")
-        self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index)
+        self.update_text_signal.emit("加载下一章...", False)
+        self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index, False)
 
     def prev_chapter(self):
         if self.current_chapter_index > 0:
             self.current_chapter_index -= 1
-            self.update_text_signal.emit("加载上一章...")
-            self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index)
+            self.update_text_signal.emit("加载上一章...", False)
+            # 【关键】上一章 -> 去底部
+            self.fetch_chapter_content(self.current_book['bookUrl'], self.current_chapter_index, True)
 
     def is_in_resize_area(self, pos):
         rect = self.rect()
@@ -875,8 +854,6 @@ class StealthReader(QWidget):
 
     def open_settings(self):
         self.is_settings_open = True
-
-        # 记录进入设置前的状态，如果是自动模式，暂停绘制
         was_auto = self.config.get("auto_mode")
         if was_auto:
             self.content_frame.set_mode(False)
@@ -885,28 +862,18 @@ class StealthReader(QWidget):
 
         dialog = SettingsDialog(self.config, self)
 
-        # 执行对话框
         if dialog.exec_() == QDialog.Accepted:
-            # 保存
             self.config = dialog.config
             self.save_config()
             self.apply_style()
             self.refresh_hotkeys()
             self.fetch_bookshelf_silent()
         else:
-            # 取消/关闭
             self.apply_style()
 
         self.is_settings_open = False
-
-        # --- 【关键修改】 ---
-        # 强制显示并激活窗口，防止因 Dialog 关闭导致主窗口丢失焦点或自动隐藏
         self.showNormal()
         self.activateWindow()
-
-        # 确保原来的幽灵模式检测代码已经被删除或注释掉了
-        # if self.config.get("ghost_mode", False) and not self.underMouse():
-        #     self.setWindowOpacity(0.005)
 
     def keyPressEvent(self, event):
         key = event.key()
