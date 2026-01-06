@@ -63,7 +63,7 @@ class CornerFrame(QFrame):
         """[新增] 接收采样到的屏幕颜色，并应用极低透明度"""
         # 保持颜色基调，但强制 Alpha = 2 (解决透明度问题)
         self.auto_bg_fill = QColor(color)
-        self.auto_bg_fill.setAlpha(2)
+        self.auto_bg_fill.setAlpha(1)
         if self.is_auto_mode:
             self.update()
 
@@ -260,13 +260,20 @@ class TocSelector(QDialog):
         super().closeEvent(event)
 
 
-# ================= 设置窗口 =================
+
+# ================= 设置窗口 (已修改：支持实时预览与还原) =================
 class SettingsDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
+        self.main_window = parent  # 保存主窗口引用
+
+        # 1. 记录原始透明度，用于“取消”时还原
+        self.original_opacity = self.config.get("opacity", 0.9)
+
         self.temp_text_color = self.config.get("text_color")
         self.temp_bg_color = self.config.get("bg_color")
+
         self.setWindowTitle("设置")
         self.resize(350, 480)
         self.setStyleSheet(DARK_STYLESHEET)
@@ -286,6 +293,8 @@ class SettingsDialog(QDialog):
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(int(self.config.get("opacity") * 100))
+        # 2. 绑定滑块变动信号到预览函数
+        self.opacity_slider.valueChanged.connect(self.on_opacity_change)
         layout.addRow("不透明度 (文字/整体):", self.opacity_slider)
 
         self.font_spin = QSpinBox()
@@ -309,7 +318,7 @@ class SettingsDialog(QDialog):
         layout.addRow("全局老板键:", self.boss_key_input)
 
         btn_save = QPushButton("💾 保存并应用")
-        btn_save.clicked.connect(self.save_settings)
+        btn_save.clicked.connect(self.accept)  # 点击保存调用 accept
         layout.addRow(btn_save)
 
         self.on_auto_mode_toggled(self.check_auto_mode.isChecked())
@@ -319,6 +328,16 @@ class SettingsDialog(QDialog):
         self.btn_bg_color.setEnabled(not checked)
         self.btn_text_color.setEnabled(not checked)
         self.opacity_slider.setEnabled(True)
+
+    # 3. 新增：实时预览透明度逻辑
+    def on_opacity_change(self, value):
+        # 实时修改配置字典中的值
+        new_opacity = value / 100.0
+        self.config["opacity"] = new_opacity
+
+        # 调用主窗口的样式应用方法，实现实时效果
+        if self.main_window:
+            self.main_window.apply_style()
 
     def pick_text_color(self):
         color = QColorDialog.getColor()
@@ -332,16 +351,29 @@ class SettingsDialog(QDialog):
             self.temp_bg_color = f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
             self.btn_bg_color.setStyleSheet(f"background-color: {self.temp_bg_color};")
 
-    def save_settings(self):
+    # 4. 修改：保存设置逻辑 (重写 accept)
+    def accept(self):
+        # 这里只负责保存那些没有实时预览的参数
+        # 透明度已经在 on_opacity_change 里实时修改了 self.config["opacity"]
         self.config["ip"] = self.ip_input.text().strip()
-        self.config["opacity"] = self.opacity_slider.value() / 100.0
         self.config["font_size"] = self.font_spin.value()
         self.config["boss_key"] = self.boss_key_input.text().strip()
         self.config["text_color"] = self.temp_text_color
         self.config["bg_color"] = self.temp_bg_color
         self.config["ghost_mode"] = self.check_ghost_mode.isChecked()
         self.config["auto_mode"] = self.check_auto_mode.isChecked()
-        self.accept()
+        super().accept()
+
+    # 5. 新增：重写 reject (处理取消/关闭/Esc)
+    def reject(self):
+        # 如果用户直接关闭窗口，必须把透明度还原回去
+        self.config["opacity"] = self.original_opacity
+
+        # 立即刷新主窗口外观
+        if self.main_window:
+            self.main_window.apply_style()
+
+        super().reject()
 
 
 # ================= 主程序 =================
@@ -813,25 +845,38 @@ class StealthReader(QWidget):
 
     def open_settings(self):
         self.is_settings_open = True
+
+        # 记录进入设置前的状态，如果是自动模式，暂停绘制
         was_auto = self.config.get("auto_mode")
         if was_auto:
-            self.content_frame.set_mode(False)  # 暂停绘制隐形背景
+            self.content_frame.set_mode(False)
             self.setWindowOpacity(0.95)
             self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
 
         dialog = SettingsDialog(self.config, self)
+
+        # 执行对话框
         if dialog.exec_() == QDialog.Accepted:
+            # 保存
             self.config = dialog.config
             self.save_config()
             self.apply_style()
             self.refresh_hotkeys()
             self.fetch_bookshelf_silent()
         else:
+            # 取消/关闭
             self.apply_style()
 
         self.is_settings_open = False
-        if self.config.get("ghost_mode", False) and not self.underMouse():
-            self.setWindowOpacity(0.005)
+
+        # --- 【关键修改】 ---
+        # 强制显示并激活窗口，防止因 Dialog 关闭导致主窗口丢失焦点或自动隐藏
+        self.showNormal()
+        self.activateWindow()
+
+        # 确保原来的幽灵模式检测代码已经被删除或注释掉了
+        # if self.config.get("ghost_mode", False) and not self.underMouse():
+        #     self.setWindowOpacity(0.005)
 
     def keyPressEvent(self, event):
         key = event.key()
