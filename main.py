@@ -63,7 +63,7 @@ class CornerFrame(QFrame):
         """[新增] 接收采样到的屏幕颜色，并应用极低透明度"""
         # 保持颜色基调，但强制 Alpha = 2 (解决透明度问题)
         self.auto_bg_fill = QColor(color)
-        self.auto_bg_fill.setAlpha(1)
+        self.auto_bg_fill.setAlpha(2)
         if self.is_auto_mode:
             self.update()
 
@@ -623,13 +623,43 @@ class StealthReader(QWidget):
     def leaveEvent(self, event):
         self.is_mouse_in = False
         if self.is_settings_open or self.is_resizing or self.is_moving: return
+
         global_pos = QCursor.pos()
         local_pos = self.mapFromGlobal(global_pos)
         if self.rect().contains(local_pos): return
 
         if self.config.get("ghost_mode", False):
-            # 幽灵模式移出：整体变透明
-            self.setWindowOpacity(0.01)
+            if self.config.get("auto_mode", False):
+                # ================= [自动挡逻辑] =================
+                # 策略：停止更新颜色，隐藏角标，文字透明。
+                # 关键：背景色使用当前采样到的颜色 (R, G, B)，但 Alpha 设为 2。
+                # 这样既能捕获鼠标，其颜色逻辑又与背景融合（不使用死板的黑色）。
+
+                self.chameleon_timer.stop()
+                self.content_frame.set_draw_corners(False)
+
+                # 获取当前采样的背景色
+                # auto_bg_fill 是在 adjust_color_to_background 里更新的 QColor 对象
+                current_bg = self.content_frame.auto_bg_fill
+                r, g, b = current_bg.red(), current_bg.green(), current_bg.blue()
+
+                # 构造 Alpha=1 的动态背景色
+                # 即使它几乎不可见，其 RGB 值依然是“变色龙”采样来的值
+                ghost_bg_style = f"rgba({r}, {g}, {b}, 2)"
+
+                self.text_edit.setStyleSheet(f"""
+                    QTextEdit {{
+                        color: transparent; 
+                        background-color: {ghost_bg_style};
+                    }}
+                """)
+
+                self.setWindowOpacity(1.0)
+
+            else:
+                # ================= [手动挡逻辑] =================
+                self.setWindowOpacity(0.005)
+
         super().leaveEvent(event)
 
     def fetch_bookshelf_silent(self):
