@@ -12,7 +12,9 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QMenu,
                              QFrame, QTextEdit, QShortcut, QListWidget,
                              QListWidgetItem, QLabel, QFontComboBox, QSizePolicy)
 from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QObject, QThread, QTimer, QEvent
-from PyQt5.QtGui import QFont, QColor, QCursor, QKeySequence, QPainter, QPen, QFontMetrics
+from PyQt5.QtGui import (QFont, QColor, QCursor, QKeySequence, QPainter, QPen,
+                         QFontMetrics, QImage, QPixmap, QPalette, QBrush,
+                         QAbstractTextDocumentLayout)
 
 # 启用高分屏支持
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
@@ -23,13 +25,14 @@ CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
     "ip": "http://192.168.1.10:1122",
     "opacity": 0.9,
-    "font_size": 14,
+    "font_size": 24,
     "font_family": "Microsoft YaHei",
     "text_color": "rgba(200, 200, 200, 255)",
     "bg_color": "rgba(30, 30, 30, 200)",
     "boss_key": "Esc",
     "ghost_mode": False,
     "auto_mode": False,
+    "antishot_mode": False,
     "window_width": 400,
     "window_height": 300
 }
@@ -46,6 +49,87 @@ DARK_STYLESHEET = """
     QComboBox QAbstractItemView { background-color: #3c3c3c; color: white; selection-background-color: #505050; }
     QLabel { color: #aaa; }
 """
+
+
+# ================= 辅助类：强力噪点生成器 =================
+class NoiseGenerator:
+    @staticmethod
+    def generate_noise_pixmap(width, height):
+        """生成严格的二值化(纯黑/纯白)噪点"""
+        gray_data = os.urandom(width * height)
+        img = QImage(gray_data, width, height, width, QImage.Format_Grayscale8)
+
+        # 严格二值化颜色表
+        color_table = [0] * 256
+        for i in range(256):
+            if i > 127:
+                color_table[i] = 0xFFFFFFFF  # 纯白
+            else:
+                color_table[i] = 0xFF000000  # 纯黑
+
+        img.setColorTable(color_table)
+        final_img = img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        return QPixmap.fromImage(final_img)
+
+
+# ================= 核心：自定义防截屏文本框 =================
+class AntishotTextEdit(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.antishot_mode = False
+        self.static_noise = None
+        self.dynamic_noise = None
+        self.noise_offset_y = 0  # 核心变量：控制垂直滚动
+
+    def set_antishot_assets(self, static_noise, dynamic_noise):
+        """设置基础素材"""
+        self.static_noise = static_noise
+        self.dynamic_noise = dynamic_noise
+        self.viewport().update()
+
+    def set_noise_offset(self, offset_y):
+        """设置滚动偏移量并重绘"""
+        self.noise_offset_y = offset_y
+        self.viewport().update()
+
+    def paintEvent(self, event):
+        if not self.antishot_mode or not self.static_noise or not self.dynamic_noise:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self.viewport())
+        rect = self.viewport().rect()
+
+        # 1. 底层：绘制静态噪点（背景），位置固定不动
+        painter.drawTiledPixmap(rect, self.static_noise)
+
+        # 2. 遮罩层：透明画布
+        buffer_image = QImage(rect.size(), QImage.Format_ARGB32_Premultiplied)
+        buffer_image.fill(Qt.transparent)
+
+        buffer_painter = QPainter(buffer_image)
+
+        # A. 绘制文字（模具）
+        ctx = QAbstractTextDocumentLayout.PaintContext()
+        ctx.palette.setColor(QPalette.Text, Qt.black)
+
+        buffer_painter.translate(0, -self.verticalScrollBar().value())
+        self.document().documentLayout().draw(buffer_painter, ctx)
+        buffer_painter.resetTransform()
+
+        # B. 【核心修改】绘制动态噪点 (SourceIn模式)
+        # 使用 setCompositionMode(SourceIn) 让噪点只出现在文字内部
+        buffer_painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+
+        # 【关键】drawTiledPixmap 的第三个参数是 origin (原点偏移)
+        # 我们在这里传入 (0, self.noise_offset_y)，实现噪点的垂直滚动
+        # 这样文字位置不变，但文字"里面"的填充物在不断向上流动
+        buffer_painter.drawTiledPixmap(rect, self.dynamic_noise, QPoint(0, self.noise_offset_y))
+
+        buffer_painter.end()
+
+        # 3. 合成
+        painter.drawImage(0, 0, buffer_image)
 
 
 # ================= 辅助类：绘制背景和角标 =================
@@ -78,7 +162,6 @@ class CornerFrame(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), self.auto_bg_fill)
 
-        # 只有当高度大于 20 像素时才画角标，避免单行模式下遮挡文字
         if self.height() > 20:
             painter.setPen(QPen(self.corner_color, 3))
             w, h = self.width(), self.height()
@@ -96,7 +179,6 @@ class BookSelector(QDialog):
         self.main_window = main_window
         self.setWindowTitle("📚 书架")
         self.resize(400, 500)
-        self.selected_book = None
         self.setStyleSheet(DARK_STYLESHEET)
         self.initUI()
         self.populate_list(self.main_window.books)
@@ -262,7 +344,7 @@ class SettingsDialog(QDialog):
         self.temp_bg_color = self.config.get("bg_color")
 
         self.setWindowTitle("设置")
-        self.resize(350, 520)
+        self.resize(350, 560)
         self.setStyleSheet(DARK_STYLESHEET)
         self.initUI()
 
@@ -277,6 +359,12 @@ class SettingsDialog(QDialog):
         self.check_auto_mode.toggled.connect(self.on_auto_mode_toggled)
         layout.addRow(self.check_auto_mode)
 
+        self.check_antishot = QCheckBox("🛡️ 防截屏模式 (动态噪声)")
+        self.check_antishot.setToolTip("原理：文字作为遮罩显示动态噪点，背景为静态噪点。\n截图时完全隐形。")
+        self.check_antishot.setChecked(self.config.get("antishot_mode", False))
+        self.check_antishot.toggled.connect(self.on_antishot_toggled)
+        layout.addRow(self.check_antishot)
+
         self.opacity_slider = QSlider(Qt.Horizontal)
         self.opacity_slider.setRange(10, 100)
         self.opacity_slider.setValue(int(self.config.get("opacity") * 100))
@@ -288,7 +376,6 @@ class SettingsDialog(QDialog):
         self.font_spin.setValue(self.config.get("font_size"))
         layout.addRow("字体大小:", self.font_spin)
 
-        # 字体选择下拉框
         self.font_combo = QFontComboBox()
         current_font_family = self.config.get("font_family", "Microsoft YaHei")
         self.font_combo.setCurrentFont(QFont(current_font_family))
@@ -314,12 +401,25 @@ class SettingsDialog(QDialog):
         layout.addRow(btn_save)
 
         self.on_auto_mode_toggled(self.check_auto_mode.isChecked())
+        self.on_antishot_toggled(self.check_antishot.isChecked())
         self.setLayout(layout)
 
     def on_auto_mode_toggled(self, checked):
         self.btn_bg_color.setEnabled(not checked)
         self.btn_text_color.setEnabled(not checked)
         self.opacity_slider.setEnabled(True)
+        if checked:
+            self.check_antishot.setChecked(False)
+
+    def on_antishot_toggled(self, checked):
+        if checked:
+            self.check_auto_mode.setChecked(False)
+            self.btn_bg_color.setEnabled(False)
+            self.btn_text_color.setEnabled(False)
+        else:
+            if not self.check_auto_mode.isChecked():
+                self.btn_bg_color.setEnabled(True)
+                self.btn_text_color.setEnabled(True)
 
     def on_opacity_change(self, value):
         new_opacity = value / 100.0
@@ -348,6 +448,7 @@ class SettingsDialog(QDialog):
         self.config["bg_color"] = self.temp_bg_color
         self.config["ghost_mode"] = self.check_ghost_mode.isChecked()
         self.config["auto_mode"] = self.check_auto_mode.isChecked()
+        self.config["antishot_mode"] = self.check_antishot.isChecked()
         super().accept()
 
     def reject(self):
@@ -371,7 +472,7 @@ class StealthReader(QWidget):
         self.current_book = None
         self.current_chapter_index = 0
         self.current_toc = []
-        self.single_line_height = 20  # 默认最小高度
+        self.single_line_height = 20
 
         self.is_mouse_in = False
         self.is_resizing = False
@@ -381,9 +482,19 @@ class StealthReader(QWidget):
         self.local_shortcut = None
         self.book_selector_dialog = None
 
+        # 变色龙模式定时器
         self.chameleon_timer = QTimer(self)
         self.chameleon_timer.setInterval(500)
         self.chameleon_timer.timeout.connect(self.adjust_color_to_background)
+
+        # 防截屏模式相关初始化
+        self.static_noise = None
+        self.dynamic_noise_base = None  # 基础动态噪点图
+        self.noise_offset = 0  # 滚动偏移量
+        self.antishot_timer = QTimer(self)
+        self.antishot_timer.setInterval(33)  # 约30fps，保证流动顺滑
+        self.antishot_timer.timeout.connect(self.update_antishot_noise)
+        self.prepare_noise_assets()
 
         self.initUI()
         self.initTray()
@@ -397,7 +508,25 @@ class StealthReader(QWidget):
         if self.config["ip"] and self.config["ip"].startswith("http"):
             self.fetch_bookshelf_silent()
 
-        self.update_text_signal.emit("初始化完成。\n拖动右下角调整大小。", False)
+        self.update_text_signal.emit("初始化完成。\n防截屏模式：文字内部噪点向上流动。", False)
+
+    def prepare_noise_assets(self):
+        size = 128
+        # 生成两张完全不同的随机噪点图，一张给背景，一张给文字
+        self.static_noise = NoiseGenerator.generate_noise_pixmap(size, size)
+        self.dynamic_noise_base = NoiseGenerator.generate_noise_pixmap(size, size)
+
+    def update_antishot_noise(self):
+        """更新偏移量，实现噪点向上滚动"""
+        if not self.isVisible() or not self.config.get("antishot_mode"):
+            self.antishot_timer.stop()
+            return
+
+        # 每次向上移动 3 像素 (负数代表向上)
+        self.noise_offset = (self.noise_offset - 3) % 128
+
+        # 传递偏移量而不是新的图片帧
+        self.text_edit.set_noise_offset(self.noise_offset)
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -460,18 +589,17 @@ class StealthReader(QWidget):
         self.setMouseTracking(True)
 
         self.main_layout = QVBoxLayout()
-        # 【关键】外层布局所有边距归零
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
         self.content_frame = CornerFrame()
         self.content_layout = QVBoxLayout(self.content_frame)
 
-        # 【关键】内层边距压缩，只留左右一点缝隙
         self.content_layout.setContentsMargins(5, 0, 5, 0)
         self.content_layout.setSpacing(0)
 
-        self.text_edit = QTextEdit()
+        # 【核心修改】使用自定义的 AntishotTextEdit
+        self.text_edit = AntishotTextEdit()
         self.text_edit.setReadOnly(True)
         self.text_edit.setFrameStyle(QFrame.NoFrame)
         self.text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -479,9 +607,7 @@ class StealthReader(QWidget):
         self.text_edit.setTextInteractionFlags(Qt.NoTextInteraction)
         self.text_edit.setFocusPolicy(Qt.NoFocus)
 
-        # 【核心修改 1】忽略建议高度，允许无限缩小
         self.text_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
-        # 【核心修改 2】去除文档内部留白
         self.text_edit.setMinimumHeight(0)
         self.text_edit.document().setDocumentMargin(0)
 
@@ -538,6 +664,7 @@ class StealthReader(QWidget):
         if self.isVisible():
             self.sync_progress_async()
             self.hide()
+            self.antishot_timer.stop()
         else:
             self.showNormal()
             self.apply_style()
@@ -545,6 +672,8 @@ class StealthReader(QWidget):
             if self.config.get("auto_mode", False):
                 self.chameleon_timer.start()
                 self.adjust_color_to_background()
+            if self.config.get("antishot_mode", False):
+                self.antishot_timer.start()
 
     def adjust_color_to_background(self):
         if not self.isVisible() or not self.config.get("auto_mode"):
@@ -572,7 +701,6 @@ class StealthReader(QWidget):
             user_alpha = int(self.config.get("opacity", 0.9) * 255)
             rgba_color = f"rgba({base_text_color[0]}, {base_text_color[1]}, {base_text_color[2]}, {user_alpha})"
 
-            # 保持 padding 为 0
             self.text_edit.setStyleSheet(f"""
                 QTextEdit {{
                     color: {rgba_color};
@@ -583,29 +711,68 @@ class StealthReader(QWidget):
 
     def apply_style(self):
         font_family = self.config.get('font_family', 'Microsoft YaHei')
-        font = QFont(font_family, self.config['font_size'])
-        self.text_edit.setFont(font)
+        font_size = self.config['font_size']
+        font = QFont(font_family, font_size)
 
-        # 计算单行高度用于限制窗口最小尺寸
         fm = QFontMetrics(font)
         self.single_line_height = fm.lineSpacing()
-
-        # 强制 CSS 无填充
         base_css = "padding: 0px; margin: 0px; border: none;"
 
-        if self.config.get("auto_mode", False):
+        # === 模式 1: 防截屏模式 ===
+        if self.config.get("antishot_mode", False):
+            self.chameleon_timer.stop()
+            self.setWindowOpacity(1.0)
+            self.content_frame.set_draw_corners(False)
+            self.content_frame.set_mode(False)
+
+            # 关闭抗锯齿，使用最粗字体
+            font.setStyleStrategy(QFont.NoAntialias)
+            font.setWeight(QFont.Black)
+            self.text_edit.setFont(font)
+
+            # 启用 TextEdit 的自定义模式
+            self.text_edit.antishot_mode = True
+
+            # 初始化素材
+            self.text_edit.set_antishot_assets(self.static_noise, self.dynamic_noise_base)
+
+            # 移除所有样式表干扰
+            self.text_edit.setStyleSheet("QTextEdit { border: none; background: transparent; }")
+            self.content_frame.setStyleSheet("background: transparent;")
+
+            self.antishot_timer.start()
+
+        # === 模式 2: 变色龙模式 ===
+        elif self.config.get("auto_mode", False):
+            self.text_edit.antishot_mode = False
+            font.setStyleStrategy(QFont.PreferAntialias)
+            font.setWeight(QFont.Normal)
+            self.text_edit.setFont(font)
+
+            self.antishot_timer.stop()
             self.setWindowOpacity(1.0)
             self.content_frame.set_mode(True)
             self.content_frame.setStyleSheet("background: transparent; border: none;")
             self.content_frame.set_draw_corners(True)
             self.chameleon_timer.start()
             self.adjust_color_to_background()
+
+        # === 模式 3: 普通模式 ===
         else:
+            self.text_edit.antishot_mode = False
+            font.setStyleStrategy(QFont.PreferAntialias)
+            font.setWeight(QFont.Normal)
+            self.text_edit.setFont(font)
+
             self.chameleon_timer.stop()
+            self.antishot_timer.stop()
             self.content_frame.set_draw_corners(False)
             self.setWindowOpacity(self.config["opacity"])
             self.setStyleSheet("")
             self.content_frame.set_mode(False)
+
+            self.text_edit.setPalette(QApplication.palette())
+
             frame_style = f"""
                 CornerFrame {{
                     background-color: {self.config['bg_color']};
@@ -624,7 +791,7 @@ class StealthReader(QWidget):
 
     def enterEvent(self, event):
         self.is_mouse_in = True
-        if self.config.get("ghost_mode", False):
+        if self.config.get("ghost_mode", False) and not self.config.get("antishot_mode"):
             self.apply_style()
         super().enterEvent(event)
 
@@ -636,7 +803,7 @@ class StealthReader(QWidget):
         local_pos = self.mapFromGlobal(global_pos)
         if self.rect().contains(local_pos): return
 
-        if self.config.get("ghost_mode", False):
+        if self.config.get("ghost_mode", False) and not self.config.get("antishot_mode"):
             if self.config.get("auto_mode", False):
                 self.chameleon_timer.stop()
                 self.content_frame.set_draw_corners(False)
@@ -854,7 +1021,7 @@ class StealthReader(QWidget):
         if event.buttons() == Qt.LeftButton:
             if self.is_resizing:
                 new_w = max(event.pos().x(), 100)
-                # 【核心修改 3】动态计算最小高度，允许压扁
+                # 动态计算最小高度，允许压扁
                 min_h = getattr(self, 'single_line_height', 20)
                 new_h = max(event.pos().y(), min_h)
                 self.resize(new_w, new_h)
