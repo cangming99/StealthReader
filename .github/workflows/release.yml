@@ -64,7 +64,8 @@ jobs:
             exit 1
           fi
           echo "✅ Build successful!"
-
+        shell: bash
+        
       # =============== 条件：是否发布到 Release ===============
       - name: Create GitHub Release (if enabled)
         uses: softprops/action-gh-release@v2
