@@ -28,19 +28,26 @@ jobs:
 
       # =============== 确定版本号 ===============
       - name: Set version tag
+        id: set_version
+        shell: pwsh
         run: |
-          if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          elif [[ "${{ github.event.inputs.version }}" != "" ]]; then
-            VERSION="${{ github.event.inputs.version }}"
-          else
-            # Auto-generate in Beijing time
-            DATE_TIME=$(TZ='Asia/Shanghai' date +"%Y.%m.%d-%H%M%S")
-            VERSION="v${DATE_TIME}"
-          fi
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "✅ Version: ${VERSION}"
-        shell: bash
+          $githubRef = "${{ github.ref }}"
+          $inputVersion = "${{ github.event.inputs.version }}"
+          
+          if ($githubRef -like "refs/tags/v*") {
+              $VERSION = $githubRef.Replace("refs/tags/", "")
+          } elseif ($inputVersion -ne "") {
+              $VERSION = $inputVersion
+          } else {
+              # Auto-generate in Beijing time (UTC+8)
+              # 使用 PowerShell 获取精准的北京时间
+              $now = [DateTime]::UtcNow.AddHours(8)
+              $DATE_TIME = $now.ToString("yyyy.MM.dd-HHmmss")
+              $VERSION = "v$DATE_TIME"
+          }
+          
+          echo "VERSION=$VERSION" >> $env:GITHUB_ENV
+          Write-Host "✅ Version: $VERSION"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
